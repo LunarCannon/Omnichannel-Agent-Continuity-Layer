@@ -30,6 +30,52 @@ A personal agent often lives in multiple places:
 - voice interfaces
 - email or work chat
 
+## Voice boundary
+
+Voice is a first-class **surface/modality** for OAC, not voice infrastructure owned by OAC.
+
+OAC should record voice-originated interactions as compact continuity events:
+
+- a voice interaction happened
+- who/surface/channel/session it belongs to
+- transcript or response summary
+- topic linkage
+- decisions, questions, promises, and tasks extracted from the interaction
+- sensitivity tier and safe surfacing rules
+- optional artifact reference if audio is intentionally retained elsewhere
+
+OAC should not own or import:
+
+- Supertonic, ElevenLabs, or other TTS/STT provider adapters
+- audio transcoding or Telegram Opus conversion
+- voice cloning/style configuration
+- realtime call/session runtime
+- Destructor-specific voice/persona behavior
+
+Dependency rule:
+
+> Voice runtimes may record OAC events. OAC should not call voice providers.
+
+Example voice event:
+
+```json
+{
+  "surface": "telegram",
+  "modality": "voice",
+  "channel_id": "thread-35",
+  "sender": "Ti Kawamoto",
+  "canonical_user_id": "ti",
+  "role": "user",
+  "summary": "Ti agreed to split OAC and provider-neutral voice-layer intent.",
+  "topic": "Destructor voice architecture",
+  "sensitivity": "private",
+  "continuity_intent": "continue_topic",
+  "artifact_ref": "local://audio/destructor-demo.wav"
+}
+```
+
+Provider-neutral voice runtime belongs in a separate project, e.g. `Hermes-Voice-Layer`; Destructor/app-specific behavior belongs in a Destructor repo.
+
 Without an explicit continuity layer, the agent becomes a fleet of siloed bots wearing the same nametag. Long-term memory helps, but it is usually too broad, too slow, too leaky, or too stale for the simple operational question:
 
 > What were we just doing, and what is safe to carry into this room?
