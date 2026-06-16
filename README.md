@@ -326,20 +326,139 @@ Expected:
 - Agent does not reveal the fake sensitive code.
 - Agent may say sensitive context exists and should be handled on Signal/local.
 
+## Local record, context, and digest vertical slices
+
+The first implemented slices are intentionally local-only. There is no cron, delivery, gateway hook, or LLM dependency in these slices.
+
+### Record a compact continuity event
+
+`record` appends one compact event to `events.jsonl` and updates rolling `state.json` under a file lock. It also applies a small credential-ish redaction guard before writing the ledger.
+
+```bash
+PYTHONPATH=src python -m oac.cli record \
+  --store .oac \
+  --surface telegram \
+  --channel-id thread-1340 \
+  --sender "Ti Kawamoto" \
+  --canonical-user-id ti \
+  --role user \
+  --summary "Ti picked the local record slice." \
+  --topic-id oac-record \
+  --topic-title "OAC local record slice" \
+  --sensitivity private \
+  --modality text \
+  --decision "Build record before context or gateway hooks."
+```
+
+Voice runtimes can persist provider-blind voice events with an artifact reference while keeping provider/codec details outside OAC:
+
+```bash
+PYTHONPATH=src python -m oac.cli record \
+  --store .oac \
+  --surface telegram \
+  --channel-id thread-35 \
+  --sender Destructor \
+  --canonical-user-id ti \
+  --role assistant \
+  --summary "Destructor sent a voice reply about the OAC integration slice." \
+  --topic-id destructor-voice \
+  --topic-title "Destructor voice" \
+  --sensitivity private \
+  --modality voice \
+  --artifact-ref local:///tmp/destructor-voice.ogg
+```
+
+This writes:
+
+- `.oac/events.jsonl`
+- `.oac/state.json`
+
+### Map surface identities deterministically
+
+`alias` stores explicit sender-to-canonical-user mappings in `state.json`. OAC never guesses identity in group chats; callers either pass `--canonical-user-id` directly or configure a deterministic alias first.
+
+```bash
+PYTHONPATH=src python -m oac.cli alias set \
+  --store .oac \
+  --surface telegram \
+  --channel-id thread-1340 \
+  --sender "Ti Kawamoto" \
+  --canonical-user-id ti
+
+PYTHONPATH=src python -m oac.cli alias resolve \
+  --store .oac \
+  --surface telegram \
+  --channel-id thread-1340 \
+  --sender "Ti Kawamoto"
+```
+
+Alias keys use the deterministic form:
+
+```text
+surface:channel_id:sender
+```
+
+Existing aliases cannot be remapped unless `--force` is passed. Alias fields reject control characters and `:` delimiters so sender names cannot poison logs, JSON, prompt context, or alias keys. Topic selection and topic metadata are scoped to the resolved canonical user; another participant's active topic metadata, shared topic IDs, legacy unowned topic metadata, or events missing `canonical_user_id` must not bleed into the current user's context.
+
+### Emit a prompt-ready context brief
+
+`context` reads the local store and writes only the surface-filtered Markdown brief to stdout. It fails open: a missing or empty store prints nothing and exits successfully. Use `--max-chars` to keep prompt injection bounded.
+
+```bash
+PYTHONPATH=src python -m oac.cli context \
+  --store .oac \
+  --surface telegram \
+  --channel-id thread-1340 \
+  --sender "Ti Kawamoto" \
+  --query "continue the OAC digest work" \
+  --max-chars 1800
+```
+
+### Synthesize a digest artifact
+
+`synthesize` reads compact synthetic or real event summaries from JSONL plus optional rolling state, then writes a deterministic digest artifact.
+
+```bash
+PYTHONPATH=src python -m oac.cli synthesize \
+  --events .oac/events.jsonl \
+  --state .oac/state.json \
+  --out artifacts/digest.json \
+  --surface telegram \
+  --canonical-user-id ti \
+  --query "continue the OAC digest work" \
+  --as-of-ms 1781540000000
+```
+
+The artifact is JSON and includes a rendered Markdown continuity brief plus structured sections for:
+
+- deterministic source event IDs
+- recent surface-safe events
+- sensitive-context presence markers
+- contradictions between facts with the same key
+- decayed/stale event notes
+
 ## Implementation checklist
 
-- [ ] Append-only event ledger, e.g. `events.jsonl`
-- [ ] Rolling state file, e.g. `state.json`
-- [ ] Atomic writes and file lock
+- [x] Append-only event ledger, e.g. `events.jsonl`
+- [x] Rolling state file, e.g. `state.json`
+- [x] Atomic digest artifact write
+- [x] File lock for ledger writes
 - [ ] Schema migration-on-load
-- [ ] Surface policies
-- [ ] Identity aliases
-- [ ] Topic matcher
-- [ ] `record` command
-- [ ] `context` command
+- [x] Surface policies
+- [x] Identity aliases
+- [x] Topic matcher
+- [x] `record` command
+- [x] `context` command
+- [x] `synthesize` command
 - [ ] Gateway hooks for turn start/end
 - [ ] Prompt injection with timeout and env kill switch
-- [ ] Tests for low-trust redaction
+- [x] Tests for low-trust redaction
+- [x] Tests for prompt-ready context stdout and max-char truncation
+- [x] Tests for deterministic identity alias resolution
+- [x] Tests for identity hijack and cross-user topic leakage regressions
+- [x] Tests for empty-canonical, legacy-topic, delimiter-collision, and control-character regressions
+- [x] Tests for local event recording and state updates
+- [x] Tests for synthetic contradiction and decay events
 - [ ] IRL cross-channel test
 
 ## Prompt injection pseudocode
