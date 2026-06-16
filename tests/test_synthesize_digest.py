@@ -31,6 +31,7 @@ def run_synthesize(tmp_path: Path, events: list[dict], *, surface: str = "telegr
                         "canonical_user_id": "ti",
                         "title": "OAC continuity digest vertical slice",
                         "summary": "Build a local-first deterministic synthesize command for OAC digest artifacts.",
+                        "sensitivity": "public",
                     }
                 },
                 "active_topic_ids": ["oac-digest"],
@@ -81,7 +82,7 @@ def test_synthesize_writes_deterministic_digest_artifact_with_safe_recent_events
             "canonical_user_id": "ti",
             "role": "user",
             "summary": "Ti narrowed scope to local synthesize, deterministic collection, artifacts, contradictions, decay, and tests.",
-            "sensitivity": "private",
+            "sensitivity": "public",
             "topic_id": "oac-digest",
             "continuity_intent": "continue_topic",
         },
@@ -111,6 +112,7 @@ def test_synthesize_writes_deterministic_digest_artifact_with_safe_recent_events
     assert digest["topic_summary"] == "Build a local-first deterministic synthesize command for OAC digest artifacts."
     assert digest["source_event_ids"] == ["tg-earlier", "sig-later"]
     assert [event["id"] for event in digest["recent_safe_events"]] == ["tg-earlier", "sig-later"]
+    assert digest["sensitive_context"] == []
     assert "Contradictions" in digest["markdown"]
     assert "Decay" in digest["markdown"]
 

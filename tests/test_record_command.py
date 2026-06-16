@@ -80,7 +80,7 @@ def test_record_appends_event_and_updates_rolling_state(tmp_path: Path) -> None:
     assert event["id"] == "evt_68a1c93fd9773154"
 
     state = json.loads((store / "state.json").read_text(encoding="utf-8"))
-    assert state["version"] == 1
+    assert state["version"] == 2
     assert state["active_topic_ids"] == ["oac-record"]
     assert state["topics"]["ti\u001foac-record"] == {
         "canonical_user_id": "ti",
@@ -89,6 +89,8 @@ def test_record_appends_event_and_updates_rolling_state(tmp_path: Path) -> None:
         "summary": "Ti picked the local record slice.",
         "last_event_id": event["id"],
         "last_updated_ms": 4000,
+        "sensitivity": "private",
+        "surface": "telegram",
     }
     assert state["recent_decisions"] == [
         {

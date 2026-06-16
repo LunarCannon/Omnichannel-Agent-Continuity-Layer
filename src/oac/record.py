@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
-from .synthesize import DEFAULT_SURFACE_POLICIES, atomic_write_json, load_state, topic_state_key
+from .synthesize import atomic_write_json, load_state, migrate_state, topic_state_key
 
 VALID_ROLES = {"user", "assistant", "system", "tool"}
 VALID_SENSITIVITIES = {"public", "private", "sensitive", "secret"}
@@ -181,20 +181,6 @@ def validate_no_control_chars(name: str, value: str) -> None:
         raise ValueError(f"Event {name} cannot contain control characters")
 
 
-def migrate_state(state: dict[str, Any]) -> dict[str, Any]:
-    state.setdefault("version", 1)
-    state.setdefault("current_focus", [])
-    state.setdefault("open_questions", [])
-    state.setdefault("recent_decisions", [])
-    state.setdefault("pending_promises", [])
-    state.setdefault("tasks", {})
-    state.setdefault("surface_policies", DEFAULT_SURFACE_POLICIES)
-    state.setdefault("identity_aliases", {})
-    state.setdefault("topics", {})
-    state.setdefault("active_topic_ids", [])
-    return state
-
-
 def update_state(state: dict[str, Any], event: dict[str, Any], *, topic_title: str | None = None) -> None:
     topic_id = str(event["topic_id"])
     canonical_user_id = str(event["canonical_user_id"])
@@ -208,6 +194,8 @@ def update_state(state: dict[str, Any], event: dict[str, Any], *, topic_title: s
         "summary": event["summary"],
         "last_event_id": event["id"],
         "last_updated_ms": event["timestamp_ms"],
+        "sensitivity": event["sensitivity"],
+        "surface": event["surface"],
     }
 
     active_topic_ids = [item for item in state.get("active_topic_ids", []) if item != topic_id]

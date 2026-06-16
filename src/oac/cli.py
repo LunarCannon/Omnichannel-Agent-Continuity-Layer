@@ -7,6 +7,7 @@ from pathlib import Path
 from .context import build_context_brief
 from .identity import identity_aliases_json, resolve_identity_from_store, set_identity_alias
 from .record import parse_fact, record_event
+from .smoke import run_smoke_check
 from .synthesize import atomic_write_json, load_jsonl, load_state, synthesize_digest
 
 
@@ -67,6 +68,25 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--max-chars", type=int, default=1800, help="Maximum characters to emit")
     context.add_argument("--max-events", type=int, default=12, help="Maximum recent events to render")
     context.set_defaults(func=run_context)
+
+    smoke = subcommands.add_parser(
+        "smoke",
+        help="Run a deterministic local cross-channel continuity smoke check and write a report artifact.",
+    )
+    smoke.add_argument("--store", required=True, type=Path, help="Directory containing events.jsonl and state.json")
+    smoke.add_argument("--out", required=True, type=Path, help="Path to write smoke report JSON")
+    smoke.add_argument("--surface", required=True, help="Target surface receiving the brief")
+    smoke.add_argument("--canonical-user-id", required=True, help="Canonical stitched user id")
+    smoke.add_argument("--query", default="", help="Current user query/message for topic matching")
+    smoke.add_argument("--as-of-ms", type=int, default=None, help="Deterministic generation timestamp in epoch ms")
+    smoke.add_argument("--max-events", type=int, default=12, help="Maximum recent events to render")
+    smoke.add_argument(
+        "--forbidden-string",
+        action="append",
+        default=[],
+        help="String that must be absent from the serialized smoke report; repeatable.",
+    )
+    smoke.set_defaults(func=run_smoke)
 
     alias = subcommands.add_parser("alias", help="Manage deterministic identity aliases in the local store.")
     alias_subcommands = alias.add_subparsers(dest="alias_command", required=True)
@@ -152,6 +172,24 @@ def run_context(args: argparse.Namespace) -> int:
     )
     if brief:
         print(brief, end="")
+    return 0
+
+
+def run_smoke(args: argparse.Namespace) -> int:
+    passed, _report = run_smoke_check(
+        store=args.store,
+        out=args.out,
+        surface=args.surface,
+        canonical_user_id=args.canonical_user_id,
+        query=args.query,
+        as_of_ms=args.as_of_ms,
+        max_events=args.max_events,
+        forbidden_strings=args.forbidden_string,
+    )
+    print(f"Wrote smoke report: {args.out}")
+    if not passed:
+        print(f"Smoke checks failed: {args.out}", file=sys.stderr)
+        return 1
     return 0
 
 

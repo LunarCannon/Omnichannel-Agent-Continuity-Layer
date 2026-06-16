@@ -26,6 +26,9 @@ DEFAULT_SURFACE_POLICIES = {
 }
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
+SCHEMA_VERSION = 2
+VALID_ROLES = {"user", "assistant", "system", "tool"}
+VALID_TRUST_LEVELS = {"low", "high"}
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -43,17 +46,224 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"Invalid JSONL at {path}:{line_number}: {exc.msg}") from exc
         if not isinstance(value, dict):
             raise ValueError(f"Invalid JSONL at {path}:{line_number}: expected object")
-        events.append(value)
+        migrated = migrate_event(value)
+        if migrated is not None:
+            events.append(migrated)
     return events
 
 
 def load_state(path: Path | None) -> dict[str, Any]:
     if path is None or not path.exists():
-        return {"version": 1}
+        return migrate_state({})
     state = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(state, dict):
         raise ValueError(f"Invalid state at {path}: expected object")
-    return state
+    return migrate_state(state)
+
+
+def migrate_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    migrated = dict(event)
+    migrated.setdefault("sensitivity", "private")
+    migrated.setdefault("continuity_intent", "continue_topic")
+    migrated.setdefault("modality", "text")
+    migrated["schema_version"] = SCHEMA_VERSION
+
+    required = ("id", "timestamp_ms", "surface", "channel_id", "canonical_user_id", "role", "summary", "topic_id")
+    if any(migrated.get(field) in (None, "") for field in required):
+        return None
+    string_fields = (
+        "id",
+        "surface",
+        "channel_id",
+        "sender",
+        "canonical_user_id",
+        "role",
+        "summary",
+        "sensitivity",
+        "topic_id",
+        "continuity_intent",
+        "modality",
+    )
+    if any(field in migrated and not isinstance(migrated[field], str) for field in string_fields):
+        return None
+    if any(
+        has_control_chars(str(migrated.get(field, "")))
+        for field in ("id", "surface", "channel_id", "sender", "canonical_user_id", "topic_id", "modality")
+        if field in migrated
+    ):
+        return None
+    timestamp_ms = maybe_int(migrated.get("timestamp_ms"))
+    if timestamp_ms is None:
+        return None
+    migrated["timestamp_ms"] = timestamp_ms
+    if migrated["role"] not in VALID_ROLES:
+        return None
+    if migrated["sensitivity"] not in SENSITIVITY_ORDER:
+        return None
+    for field in ("decay_at_ms", "decay_after_ms"):
+        if field in migrated:
+            parsed = maybe_int(migrated[field])
+            if parsed is None:
+                return None
+            migrated[field] = parsed
+    return migrated
+
+
+def migrate_state(state: dict[str, Any]) -> dict[str, Any]:
+    migrated = dict(state)
+    migrated["version"] = SCHEMA_VERSION
+    migrated["current_focus"] = list_if_list(migrated.get("current_focus"))
+    migrated["open_questions"] = list_if_list(migrated.get("open_questions"))
+    migrated["recent_decisions"] = list_if_list(migrated.get("recent_decisions"))
+    migrated["pending_promises"] = list_if_list(migrated.get("pending_promises"))
+    migrated["tasks"] = migrated.get("tasks") if isinstance(migrated.get("tasks"), dict) else {}
+    migrated["surface_policies"] = normalize_surface_policies(migrated.get("surface_policies"))
+    migrated["identity_aliases"] = (
+        migrated.get("identity_aliases") if isinstance(migrated.get("identity_aliases"), dict) else {}
+    )
+    migrated["active_topic_ids"] = [
+        str(topic_id)
+        for topic_id in list_if_list(migrated.get("active_topic_ids"))
+        if str(topic_id) and not has_control_chars(str(topic_id))
+    ]
+    migrated_topics, quarantined_topics = migrate_topics(migrated.get("topics"))
+    migrated["topics"] = migrated_topics
+    migrated["quarantined_legacy_topics"] = sanitize_quarantine(
+        migrated.get("quarantined_legacy_topics")
+    ) + quarantined_topics
+    return migrated
+
+
+def migrate_topics(raw_topics: Any) -> tuple[dict[str, dict[str, Any]], list[dict[str, str]]]:
+    if not isinstance(raw_topics, dict):
+        return {}, []
+
+    topics: dict[str, dict[str, Any]] = {}
+    quarantined: list[dict[str, str]] = []
+    for raw_key, raw_topic in raw_topics.items():
+        topic_key = str(raw_key)
+        if not isinstance(raw_topic, dict):
+            quarantined.append(quarantine_topic(topic_key, "invalid topic metadata"))
+            continue
+
+        raw_owner = raw_topic.get("canonical_user_id", "")
+        if not isinstance(raw_owner, str) or not raw_owner:
+            quarantined.append(quarantine_topic(topic_key, "missing canonical_user_id"))
+            continue
+        owner = raw_owner
+        topic_id = topic_id_from_state_key(topic_key, owner, raw_topic.get("topic_id"))
+        if topic_id is None:
+            quarantined.append(quarantine_topic(topic_key, "invalid topic identity"))
+            continue
+        if not topic_id or has_control_chars(owner) or has_control_chars(topic_id):
+            quarantined.append(quarantine_topic(topic_id or topic_key, "invalid topic identity"))
+            continue
+        raw_last_updated_ms = raw_topic["last_updated_ms"] if "last_updated_ms" in raw_topic else 0
+        last_updated_ms = maybe_int(raw_last_updated_ms)
+        if last_updated_ms is None:
+            quarantined.append(quarantine_topic(topic_id, "invalid topic metadata"))
+            continue
+
+        topics[topic_state_key(owner, topic_id)] = {
+            "canonical_user_id": owner,
+            "topic_id": topic_id,
+            "title": str(raw_topic.get("title") or topic_id),
+            "summary": str(raw_topic.get("summary") or ""),
+            "last_event_id": str(raw_topic.get("last_event_id") or ""),
+            "last_updated_ms": last_updated_ms,
+            "sensitivity": str(raw_topic.get("sensitivity") or "sensitive"),
+            "surface": str(raw_topic.get("surface") or ""),
+        }
+    return topics, quarantined
+
+
+def sanitize_quarantine(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    sanitized: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        topic_id = str(item.get("topic_id", ""))
+        reason = str(item.get("reason", "invalid topic metadata"))
+        if topic_id and not has_control_chars(topic_id) and not has_control_chars(reason):
+            sanitized.append({"topic_id": topic_id, "reason": reason})
+    return sanitized
+
+
+def normalize_surface_policies(value: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(value, dict):
+        return {surface: dict(policy) for surface, policy in DEFAULT_SURFACE_POLICIES.items()}
+    policies: dict[str, dict[str, str]] = {}
+    for raw_surface, raw_policy in value.items():
+        surface = str(raw_surface)
+        if not surface or has_control_chars(surface):
+            continue
+        policies[surface] = normalize_surface_policy(surface, raw_policy)
+    return policies
+
+
+def normalize_surface_policy(surface: str, raw_policy: Any) -> dict[str, str]:
+    fallback = default_surface_policy(surface)
+    if not isinstance(raw_policy, dict):
+        return fallback
+
+    trust = raw_policy.get("trust")
+    if not isinstance(trust, str) or trust not in VALID_TRUST_LEVELS:
+        trust = fallback["trust"]
+
+    room_scope = raw_policy.get("room_scope")
+    if not isinstance(room_scope, str) or not room_scope or has_control_chars(room_scope):
+        room_scope = fallback["room_scope"]
+
+    return {"trust": trust, "room_scope": room_scope}
+
+
+def maybe_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str) or not re.fullmatch(r"-?\d+", value):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def topic_id_from_state_key(state_key: str, owner: str, raw_topic_id: Any) -> str | None:
+    if raw_topic_id is not None:
+        if not isinstance(raw_topic_id, str) or not raw_topic_id:
+            return None
+        return raw_topic_id
+    if "\u001f" not in state_key:
+        return state_key if not has_control_chars(state_key) else None
+    key_owner, topic_id = state_key.split("\u001f", 1)
+    if key_owner != owner or not topic_id or has_control_chars(topic_id):
+        return None
+    return topic_id
+
+
+def quarantine_topic(topic_id: str, reason: str) -> dict[str, str]:
+    safe_topic_id = topic_id if topic_id and not has_control_chars(topic_id) else "[invalid]"
+    return {"topic_id": safe_topic_id, "reason": reason}
+
+
+def list_if_list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
+
+
+def has_control_chars(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
+def default_surface_policy(surface: str) -> dict[str, str]:
+    fallback = DEFAULT_SURFACE_POLICIES.get(
+        surface,
+        {"trust": "low" if surface in LOW_TRUST_SURFACES else "high", "room_scope": "dm"},
+    )
+    return dict(fallback)
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -78,10 +288,10 @@ def synthesize_digest(
     if not canonical_user_id.strip():
         raise ValueError("canonical_user_id is required")
     generated_at_ms = int(time.time() * 1000) if as_of_ms is None else as_of_ms
-    policy = surface_policy(state, surface)
+    policy = {"surface": surface, **surface_policy(state, surface)}
     user_events = events_for_user(events, canonical_user_id)
     topic_id, likely_continuation, topic_summary = choose_topic(
-        state, user_events, query, canonical_user_id=canonical_user_id
+        state, user_events, query, canonical_user_id=canonical_user_id, policy=policy
     )
     collected = collect_events(events, canonical_user_id=canonical_user_id, topic_id=topic_id, query=query)
     recent = collected[-max_events:]
@@ -121,7 +331,7 @@ def synthesize_digest(
         "likely_continuation": likely_continuation,
         "topic_id": topic_id,
         "topic_summary": topic_summary,
-        "current_focus": list(state.get("current_focus", [])),
+        "current_focus": current_focus_for_user(state, canonical_user_id, policy),
         "recent_safe_events": safe_events,
         "sensitive_context": sensitive_context,
         "contradictions": contradictions,
@@ -135,16 +345,18 @@ def synthesize_digest(
 
 def surface_policy(state: dict[str, Any], surface: str) -> dict[str, str]:
     configured = state.get("surface_policies", {}).get(surface)
-    if isinstance(configured, dict):
-        trust = str(configured.get("trust", "high"))
-        room_scope = str(configured.get("room_scope", "dm"))
-        return {"trust": trust, "room_scope": room_scope}
-    fallback = DEFAULT_SURFACE_POLICIES.get(surface, {"trust": "low" if surface in LOW_TRUST_SURFACES else "high", "room_scope": "dm"})
-    return dict(fallback)
+    if configured is not None:
+        return normalize_surface_policy(surface, configured)
+    return default_surface_policy(surface)
 
 
 def choose_topic(
-    state: dict[str, Any], events: list[dict[str, Any]], query: str, *, canonical_user_id: str = ""
+    state: dict[str, Any],
+    events: list[dict[str, Any]],
+    query: str,
+    *,
+    canonical_user_id: str = "",
+    policy: dict[str, str] | None = None,
 ) -> tuple[str, str, str]:
     topics = state.get("topics", {}) if isinstance(state.get("topics", {}), dict) else {}
     event_topics = sorted({str(event.get("topic_id", "")) for event in events if event.get("topic_id")})
@@ -166,7 +378,14 @@ def choose_topic(
     scored.sort(key=lambda item: (-item[0], item[1]))
     selected = scored[0][1]
     topic = topic_metadata(state, canonical_user_id, selected)
-    return selected, str(topic.get("title", selected)), str(topic.get("summary", ""))
+    return safe_topic_metadata(selected, topic, policy or {"trust": "high", "room_scope": "dm"})
+
+
+def safe_topic_metadata(topic_id: str, topic: dict[str, Any], policy: dict[str, str]) -> tuple[str, str, str]:
+    pseudo_event = {"surface": str(topic.get("surface", "")), "sensitivity": str(topic.get("sensitivity", "sensitive"))}
+    if safe_summary(pseudo_event, policy) is None:
+        return topic_id, topic_id, ""
+    return topic_id, str(topic.get("title") or topic_id), str(topic.get("summary") or "")
 
 
 def topic_metadata(state: dict[str, Any], canonical_user_id: str, topic_id: str) -> dict[str, Any]:
@@ -185,6 +404,25 @@ def topic_metadata(state: dict[str, Any], canonical_user_id: str, topic_id: str)
 
 def topic_state_key(canonical_user_id: str, topic_id: str) -> str:
     return f"{canonical_user_id}\u001f{topic_id}"
+
+
+def current_focus_for_user(state: dict[str, Any], canonical_user_id: str, policy: dict[str, str]) -> list[str]:
+    focus: list[str] = []
+    for item in list_if_list(state.get("current_focus")):
+        if isinstance(item, str):
+            if policy.get("trust") != "low":
+                focus.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("canonical_user_id", "")) != canonical_user_id:
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text:
+            continue
+        if is_sensitivity_allowed(str(item.get("sensitivity", "sensitive")), policy):
+            focus.append(text)
+    return focus
 
 
 def events_for_user(events: list[dict[str, Any]], canonical_user_id: str) -> list[dict[str, Any]]:
@@ -224,10 +462,20 @@ def is_topic_match(event: dict[str, Any], topic_id: str, query_tokens: set[str])
 
 def safe_summary(event: dict[str, Any], policy: dict[str, str]) -> str | None:
     sensitivity = str(event.get("sensitivity", "private"))
-    sensitivity_level = SENSITIVITY_ORDER.get(sensitivity, SENSITIVITY_ORDER["private"])
-    if policy.get("trust") == "low" and sensitivity_level >= SENSITIVITY_ORDER["sensitive"]:
+    if is_low_trust_cross_surface(event, policy) and SENSITIVITY_ORDER.get(sensitivity, SENSITIVITY_ORDER["private"]) >= SENSITIVITY_ORDER["private"]:
+        return None
+    if not is_sensitivity_allowed(sensitivity, policy):
         return None
     return str(event.get("summary", ""))[:240]
+
+
+def is_low_trust_cross_surface(event: dict[str, Any], policy: dict[str, str]) -> bool:
+    return policy.get("trust") == "low" and str(event.get("surface", "")) != str(policy.get("surface", ""))
+
+
+def is_sensitivity_allowed(sensitivity: str, policy: dict[str, str]) -> bool:
+    sensitivity_level = SENSITIVITY_ORDER.get(sensitivity, SENSITIVITY_ORDER["private"])
+    return not (policy.get("trust") == "low" and sensitivity_level >= SENSITIVITY_ORDER["sensitive"])
 
 
 def detect_contradictions(events: list[dict[str, Any]], policy: dict[str, str]) -> list[dict[str, Any]]:
