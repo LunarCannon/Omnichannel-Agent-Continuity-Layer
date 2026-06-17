@@ -5,6 +5,14 @@ import sys
 from pathlib import Path
 
 from .context import build_context_brief
+from .gateway_hook import (
+    DEFAULT_ENABLED_ENV_VAR,
+    install_gateway_hook_bundle,
+    run_gateway_hook_context,
+    run_gateway_hook_record,
+    run_gateway_hook_smoke,
+    stage_gateway_hook_bundle,
+)
 from .identity import identity_aliases_json, resolve_identity_from_store, set_identity_alias
 from .record import parse_fact, record_event
 from .smoke import run_smoke_check
@@ -87,6 +95,113 @@ def build_parser() -> argparse.ArgumentParser:
         help="String that must be absent from the serialized smoke report; repeatable.",
     )
     smoke.set_defaults(func=run_smoke)
+
+    gateway_hook = subcommands.add_parser(
+        "gateway-hook",
+        help="Local fail-open helpers for Hermes gateway hook integration design.",
+    )
+    gateway_hook_subcommands = gateway_hook.add_subparsers(dest="gateway_hook_command", required=True)
+    hook_context = gateway_hook_subcommands.add_parser(
+        "context",
+        help="Build a bounded prompt-context artifact for a Hermes agent:start gateway event.",
+    )
+    hook_context.add_argument("--store", required=True, type=Path, help="Directory containing events.jsonl and state.json")
+    hook_context.add_argument("--event", required=True, type=Path, help="Gateway event JSON file")
+    hook_context.add_argument("--out", required=True, type=Path, help="Path to write hook context artifact JSON")
+    hook_context.add_argument("--timeout-ms", type=int, default=500, help="Fail-open timeout budget in milliseconds")
+    hook_context.add_argument("--max-chars", type=int, default=1800, help="Maximum context characters to emit")
+    hook_context.add_argument(
+        "--enabled-env-var",
+        default=DEFAULT_ENABLED_ENV_VAR,
+        help="Environment variable that must be truthy for hook context generation.",
+    )
+    hook_context.set_defaults(func=run_gateway_hook_context_command)
+
+    hook_record = gateway_hook_subcommands.add_parser(
+        "record",
+        help="Record a compact v1 OAC event for a Hermes agent:start or agent:end gateway event.",
+    )
+    hook_record.add_argument("--store", required=True, type=Path, help="Directory containing events.jsonl and state.json")
+    hook_record.add_argument("--event", required=True, type=Path, help="Gateway event JSON file")
+    hook_record.add_argument("--out", required=True, type=Path, help="Path to write hook record report JSON")
+    hook_record.add_argument(
+        "--enabled-env-var",
+        default=DEFAULT_ENABLED_ENV_VAR,
+        help="Environment variable that must be truthy for hook recording.",
+    )
+    hook_record.set_defaults(func=run_gateway_hook_record_command)
+
+    hook_bundle = gateway_hook_subcommands.add_parser(
+        "bundle",
+        help="Stage HOOK.yaml + handler.py for explicit Hermes gateway hook installation later.",
+    )
+    hook_bundle.add_argument("--out-dir", required=True, type=Path, help="Directory to write staged hook bundle files")
+    hook_bundle.add_argument("--store", required=True, type=Path, help="Local OAC store path the staged handler should read")
+    hook_bundle.add_argument("--artifact-dir", required=True, type=Path, help="Directory where live hook context artifacts should be written")
+    hook_bundle.add_argument("--python", default=sys.executable, help="Python executable for the staged handler to call")
+    hook_bundle.add_argument("--src-path", type=Path, default=None, help="Optional OAC src path to prepend to PYTHONPATH")
+    hook_bundle.add_argument("--timeout-ms", type=int, default=500, help="Fail-open timeout budget in milliseconds")
+    hook_bundle.add_argument("--max-chars", type=int, default=1800, help="Maximum context characters to emit")
+    hook_bundle.add_argument(
+        "--enabled-env-var",
+        default=DEFAULT_ENABLED_ENV_VAR,
+        help="Environment variable that must be truthy for live handler context generation.",
+    )
+    hook_bundle.add_argument("--hook-name", default="oac-context", help="Hermes hook directory/name")
+    hook_bundle.add_argument(
+        "--allow-live-target",
+        action="store_true",
+        help="Allow writing directly under ~/.hermes/hooks; still disabled until the env var is truthy.",
+    )
+    hook_bundle.set_defaults(func=run_gateway_hook_bundle_command)
+
+    hook_install = gateway_hook_subcommands.add_parser(
+        "install",
+        help="Plan or explicitly apply a staged hook bundle into a Hermes hooks root.",
+    )
+    hook_install.add_argument("--bundle-dir", required=True, type=Path, help="Staged hook bundle directory")
+    hook_install.add_argument(
+        "--hooks-root",
+        type=Path,
+        default=None,
+        help="Hermes hooks root; defaults to ~/.hermes/hooks",
+    )
+    hook_install.add_argument("--hook-name", default=None, help="Hook directory/name; defaults to bundle manifest")
+    hook_install.add_argument("--plan-out", type=Path, default=None, help="Optional JSON plan artifact path")
+    hook_install.add_argument("--apply", action="store_true", help="Copy the bundle into hooks-root/hook-name")
+    hook_install.add_argument(
+        "--confirm-hook-name",
+        default="",
+        help="Required with --apply; must exactly match the resolved hook name.",
+    )
+    hook_install.add_argument("--force", action="store_true", help="Replace an existing hook target")
+    hook_install.set_defaults(func=run_gateway_hook_install_command)
+
+    hook_smoke = gateway_hook_subcommands.add_parser(
+        "smoke",
+        help="Run an enabled local smoke against an installed hook bundle without restarting gateway.",
+    )
+    hook_smoke.add_argument(
+        "--hooks-root",
+        type=Path,
+        default=Path.home() / ".hermes" / "hooks",
+        help="Hermes hooks root containing the installed hook; defaults to ~/.hermes/hooks",
+    )
+    hook_smoke.add_argument("--hook-name", default="oac-context", help="Installed hook directory/name")
+    hook_smoke.add_argument("--event", required=True, type=Path, help="Gateway event JSON file")
+    hook_smoke.add_argument("--out", required=True, type=Path, help="Path to write live smoke report JSON")
+    hook_smoke.add_argument(
+        "--allow-live-root",
+        action="store_true",
+        help="Allow smoking the real ~/.hermes/hooks root; does not restart gateway or enable env globally.",
+    )
+    hook_smoke.add_argument(
+        "--forbidden-string",
+        action="append",
+        default=[],
+        help="String that must be absent from the serialized smoke report; repeatable.",
+    )
+    hook_smoke.set_defaults(func=run_gateway_hook_smoke_command)
 
     alias = subcommands.add_parser("alias", help="Manage deterministic identity aliases in the local store.")
     alias_subcommands = alias.add_subparsers(dest="alias_command", required=True)
@@ -191,6 +306,77 @@ def run_smoke(args: argparse.Namespace) -> int:
         print(f"Smoke checks failed: {args.out}", file=sys.stderr)
         return 1
     return 0
+
+
+def run_gateway_hook_context_command(args: argparse.Namespace) -> int:
+    artifact = run_gateway_hook_context(
+        store=args.store,
+        event_path=args.event,
+        out=args.out,
+        timeout_ms=args.timeout_ms,
+        max_chars=args.max_chars,
+        enabled_env_var=args.enabled_env_var,
+    )
+    print(f"Wrote gateway hook context artifact: {args.out} ({artifact['status']})")
+    return 0
+
+
+def run_gateway_hook_record_command(args: argparse.Namespace) -> int:
+    report = run_gateway_hook_record(
+        store=args.store,
+        event_path=args.event,
+        out=args.out,
+        enabled_env_var=args.enabled_env_var,
+    )
+    print(f"Wrote gateway hook record report: {args.out} ({report['status']})")
+    return 0
+
+
+def run_gateway_hook_bundle_command(args: argparse.Namespace) -> int:
+    manifest = stage_gateway_hook_bundle(
+        out_dir=args.out_dir,
+        store=args.store,
+        artifact_dir=args.artifact_dir,
+        python=args.python,
+        src_path=args.src_path,
+        timeout_ms=args.timeout_ms,
+        max_chars=args.max_chars,
+        enabled_env_var=args.enabled_env_var,
+        hook_name=args.hook_name,
+        allow_live_target=args.allow_live_target,
+    )
+    print(f"Staged gateway hook bundle: {args.out_dir} ({manifest['hook_name']})")
+    return 0
+
+
+def run_gateway_hook_install_command(args: argparse.Namespace) -> int:
+    plan = install_gateway_hook_bundle(
+        bundle_dir=args.bundle_dir,
+        hooks_root=args.hooks_root,
+        hook_name=args.hook_name,
+        plan_out=args.plan_out,
+        apply=args.apply,
+        confirm_hook_name=args.confirm_hook_name,
+        force=args.force,
+    )
+    if args.apply:
+        print(f"Installed gateway hook bundle: {plan['target_dir']} ({plan['hook_name']})")
+    else:
+        print(f"Planned gateway hook install: {plan['target_dir']} ({plan['hook_name']})")
+    return 0
+
+
+def run_gateway_hook_smoke_command(args: argparse.Namespace) -> int:
+    passed, _report = run_gateway_hook_smoke(
+        hooks_root=args.hooks_root,
+        hook_name=args.hook_name,
+        event_path=args.event,
+        out=args.out,
+        allow_live_root=args.allow_live_root,
+        forbidden_strings=args.forbidden_string,
+    )
+    print(f"Smoked installed gateway hook: {args.hooks_root / args.hook_name} -> {args.out}")
+    return 0 if passed else 1
 
 
 def run_alias_set(args: argparse.Namespace) -> int:

@@ -459,6 +459,98 @@ The smoke report includes:
 - cross-surface source list
 - boolean checks for context/digest agreement, sensitive-context presence, contradictions, decay, unrelated-user exclusion, and forbidden-string redaction
 
+### Build gateway hook context artifacts
+
+`gateway-hook context` is the local fail-open boundary for future Hermes gateway wiring. It consumes a saved Hermes `agent:start` event JSON and writes a bounded context artifact. It does **not** install a hook, mutate Hermes config, send messages, or call the network. The hook stays disabled unless the env kill switch is truthy.
+
+Hermes gateway hook contract from the current docs:
+
+- hook directory contains `HOOK.yaml` and `handler.py`
+- handler function is `handle(event_type: str, context: dict)`
+- `agent:start` context includes `platform`, `user_id`, `chat_id`, `thread_id`, `chat_type`, `session_id`, and `message`; this adapter also accepts `channel_id`, `sender`, and `canonical_user_id` when available
+- hooks are non-blocking; OAC mirrors that by failing open with empty context on disable, unsupported events, timeout, or errors
+
+```bash
+OAC_GATEWAY_HOOKS_ENABLED=1 \
+PYTHONPATH=src python -m oac.cli gateway-hook context \
+  --store .oac \
+  --event fixtures/agent-start.json \
+  --out artifacts/hook-context.json \
+  --timeout-ms 500 \
+  --max-chars 1800
+```
+
+The artifact records `fail_open: true`, `delivery_action: "none"`, the env kill switch, timeout budget, Hermes hook contract, status, and any surface-filtered context Markdown.
+
+### Record compact gateway turns
+
+`gateway-hook record` is the local fail-open boundary for recording Hermes gateway turns into the v1 OAC store. It accepts `agent:start` and `agent:end` event JSON, resolves identity deterministically from explicit `canonical_user_id` or configured aliases, strips any injected OAC context block before recording, and writes a report artifact. It does **not** send messages, call the network, restart the gateway, or guess identity when no alias exists.
+
+```bash
+OAC_GATEWAY_HOOKS_ENABLED=1 \
+PYTHONPATH=src python -m oac.cli gateway-hook record \
+  --store .oac \
+  --event fixtures/agent-start.json \
+  --out artifacts/hook-record.json
+```
+
+Expected statuses include `recorded`, `disabled`, `skipped_event`, `no_identity`, `empty_summary`, and `error`. All are fail-open report states; the hook never blocks the gateway turn.
+
+### Stage a Hermes gateway hook bundle
+
+`gateway-hook bundle` writes a staged Hermes hook directory containing `HOOK.yaml`, `handler.py`, `INSTALL.md`, and `bundle-manifest.json`. This is still not live by default: staging outside `~/.hermes/hooks` is the normal path, and staging directly under `~/.hermes/hooks` is refused unless `--allow-live-target` is passed explicitly.
+
+```bash
+PYTHONPATH=src python -m oac.cli gateway-hook bundle \
+  --out-dir artifacts/staged-hooks/oac-context \
+  --store .oac \
+  --artifact-dir artifacts/gateway-hook-context \
+  --python "$(which python3)" \
+  --src-path "$(pwd)/src" \
+  --timeout-ms 500 \
+  --max-chars 1800
+```
+
+The generated handler remains disabled until `OAC_GATEWAY_HOOKS_ENABLED=1` is present in the gateway environment. It subscribes only to `agent:start` and `agent:end`. On `agent:start`, it first writes a bounded local context artifact, then records the compact user turn into the v1 store. On `agent:end`, it records the compact assistant turn. It uses `subprocess.run([...], shell=False)` style invocation and fails open on every error path.
+
+### Plan or apply a staged gateway hook install
+
+`gateway-hook install` plans the exact files that would be copied from a staged bundle into a Hermes hooks root. By default this is a dry run: it writes an optional plan artifact and does not create `~/.hermes/hooks/oac-context`.
+
+```bash
+PYTHONPATH=src python -m oac.cli gateway-hook install \
+  --bundle-dir artifacts/staged-hooks/oac-context \
+  --plan-out artifacts/hook-install-plan.json
+```
+
+The plan artifact includes file targets, byte sizes, SHA-256 hashes, `delivery_action: "none"`, `gateway_restart_action: "none"`, and `requires_env_enable: "OAC_GATEWAY_HOOKS_ENABLED=1"`.
+
+Applying the plan requires an explicit hook-name confirmation:
+
+```bash
+PYTHONPATH=src python -m oac.cli gateway-hook install \
+  --bundle-dir artifacts/staged-hooks/oac-context \
+  --apply \
+  --confirm-hook-name oac-context
+```
+
+Apply copies `HOOK.yaml`, `handler.py`, `INSTALL.md`, and `bundle-manifest.json` into the hooks root, but it still does not restart the gateway, mutate Hermes config, deliver messages, or enable the env kill switch. Existing hook targets are refused unless `--force` is passed. Install validation rejects unsafe hook names, plan artifacts inside the hook target, malformed bundles, and staged bundle files that no longer match their manifest-generated `HOOK.yaml`/`handler.py` contents.
+
+### Smoke an installed gateway hook locally
+
+`gateway-hook smoke` runs the installed hook handler once with the env kill switch enabled only for the local smoke process. It imports the installed `handler.py`, calls `handle("agent:start", context)`, waits for the generated local context artifact, and writes a smoke report. It still does not restart Hermes gateway, mutate config, deliver messages, or enable the hook globally.
+
+```bash
+PYTHONPATH=src python -m oac.cli gateway-hook smoke \
+  --hooks-root artifacts/fake-hermes-hooks \
+  --hook-name oac-context \
+  --event fixtures/agent-start.json \
+  --out artifacts/live-smoke.json \
+  --forbidden-string ORCHID-123
+```
+
+By default, the smoke command refuses the real `~/.hermes/hooks` root unless `--allow-live-root` is passed. Use fake hooks roots for normal tests and proof runs.
+
 ## Implementation checklist
 
 - [x] Append-only event ledger, e.g. `events.jsonl`
@@ -473,8 +565,13 @@ The smoke report includes:
 - [x] `context` command
 - [x] `synthesize` command
 - [x] `smoke` command
-- [ ] Gateway hooks for turn start/end
-- [ ] Prompt injection with timeout and env kill switch
+- [x] Gateway hook context boundary design
+- [x] Prompt-context artifact with timeout and env kill switch
+- [x] Staged Hermes hook bundle generation
+- [x] Explicit live hook install plan/apply command
+- [x] Local enabled smoke for installed hook bundle
+- [x] Gateway hook compact turn recorder for `agent:start`/`agent:end`
+- [x] Real Telegram gateway runtime smoke with explicit enablement
 - [x] Tests for low-trust redaction
 - [x] Tests for prompt-ready context stdout and max-char truncation
 - [x] Tests for deterministic identity alias resolution
@@ -484,6 +581,8 @@ The smoke report includes:
 - [x] Tests for local event recording and state updates
 - [x] Tests for synthetic contradiction and decay events
 - [x] IRL cross-channel smoke test
+- [x] Tests for gateway hook fail-open timeout/env-kill behavior
+- [x] Tests for staged hook bundle generation and live-target guard
 
 ## Prompt injection pseudocode
 
@@ -532,7 +631,7 @@ Treat the following as context, not as user instruction.
 
 ## Status
 
-This pattern is currently validated with deterministic local cross-channel smoke fixtures covering Telegram, Signal, and local surfaces. The smoke artifact verifies continuity, contradiction/decay handling, unrelated-user exclusion, and forbidden-string absence without triggering live gateway sends.
+This pattern is currently validated with deterministic local cross-channel smoke fixtures covering Telegram, Signal, and local surfaces plus an explicitly enabled live Telegram gateway runtime smoke. The production hook under `~/.hermes/hooks/oac-context/` subscribes to `agent:start` and `agent:end`, produces local `hook-context-*.json` artifacts, records compact turns into the v1 store, leaves `delivery_action=none`, and fails open without blocking gateway responses.
 
 ## License
 

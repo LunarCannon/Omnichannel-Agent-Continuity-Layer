@@ -19,6 +19,7 @@ def build_context_brief(
     as_of_ms: int | None = None,
     max_chars: int = 1800,
     max_events: int = 12,
+    infer_identity: bool = False,
 ) -> str:
     events_path = store / "events.jsonl"
     state_path = store / "state.json"
@@ -38,6 +39,13 @@ def build_context_brief(
             channel_id=channel_id,
             sender=sender,
         )
+    if infer_identity and not resolved_user_id and channel_id and sender:
+        resolved_user_id = infer_identity_from_events(
+            events=events,
+            surface=surface,
+            channel_id=channel_id,
+            sender=sender,
+        )
     if not resolved_user_id:
         return ""
     if not events_for_user(events, resolved_user_id):
@@ -53,6 +61,18 @@ def build_context_brief(
         max_events=max_events,
     )
     return truncate_context(str(digest["markdown"]), max_chars=max_chars)
+
+
+def infer_identity_from_events(*, events: list[dict], surface: str, channel_id: str, sender: str) -> str:
+    for event in reversed(events):
+        if (
+            str(event.get("surface") or "") == surface
+            and str(event.get("channel_id") or "") == channel_id
+            and str(event.get("sender") or "") == sender
+            and event.get("canonical_user_id")
+        ):
+            return str(event["canonical_user_id"])
+    return ""
 
 
 def truncate_context(markdown: str, *, max_chars: int) -> str:
