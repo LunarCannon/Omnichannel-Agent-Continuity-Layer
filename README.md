@@ -459,6 +459,29 @@ The smoke report includes:
 - cross-surface source list
 - boolean checks for context/digest agreement, sensitive-context presence, contradictions, decay, unrelated-user exclusion, and forbidden-string redaction
 
+### Sync Hermes state.db into the v1 OAC store
+
+`sync-state-db` imports compact user/assistant summaries from Hermes `state.db` into the v1 OAC store. This replaces the old standalone `~/.hermes/scripts/omnichannel_agent_continuity.py sync-state-db` path for cron-driven non-gateway/session backfill.
+
+The sync is intentionally conservative:
+
+- reads `state.db` in read-only mode
+- skips cron sessions, inactive messages, tool messages, empty/internal chatter, and unresolved identities
+- resolves identity only through deterministic aliases like `telegram:157667527:157667527 -> ti`
+- writes deterministic event IDs like `hermes:state-db:<message_id>`
+- dedupes existing `hermes:state-db:*` events, including on `--full` rescans
+- strips injected OAC context blocks before writing summaries
+- stores its cursor in `state.json` as `last_synced_state_db_message_id`
+
+```bash
+PYTHONPATH=src python -m oac.cli sync-state-db \
+  --store .oac \
+  --state-db ~/.hermes/state.db \
+  --limit 500
+```
+
+For production cron, `~/.hermes/scripts/oac_sync.sh` calls this command against `~/.hermes/oac` and normally stays silent with `--quiet`.
+
 ### Build gateway hook context artifacts
 
 `gateway-hook context` is the local fail-open boundary for future Hermes gateway wiring. It consumes a saved Hermes `agent:start` event JSON and writes a bounded context artifact. It does **not** install a hook, mutate Hermes config, send messages, or call the network. The hook stays disabled unless the env kill switch is truthy.
@@ -571,6 +594,7 @@ By default, the smoke command refuses the real `~/.hermes/hooks` root unless `--
 - [x] Explicit live hook install plan/apply command
 - [x] Local enabled smoke for installed hook bundle
 - [x] Gateway hook compact turn recorder for `agent:start`/`agent:end`
+- [x] Repo-owned Hermes `state.db` sync into v1 OAC store
 - [x] Real Telegram gateway runtime smoke with explicit enablement
 - [x] Tests for low-trust redaction
 - [x] Tests for prompt-ready context stdout and max-char truncation

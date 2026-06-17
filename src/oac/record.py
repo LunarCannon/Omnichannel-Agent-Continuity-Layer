@@ -89,6 +89,10 @@ def record_event(
     state_path = store / "state.json"
     lock_path = store / ".lock"
     with file_lock(lock_path):
+        if event_id_exists(events_path, str(event["id"])):
+            duplicate = dict(event)
+            duplicate["_oac_duplicate"] = True
+            return duplicate
         append_jsonl(events_path, event)
         state = migrate_state(load_state(state_path))
         update_state(state, event, topic_title=topic_title)
@@ -221,6 +225,21 @@ def append_state_items(
             }
         )
     state[field] = existing[-limit:]
+
+
+def event_id_exists(path: Path, event_id: str) -> bool:
+    if not path.exists():
+        return False
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and str(value.get("id") or "") == event_id:
+            return True
+    return False
 
 
 def append_jsonl(path: Path, payload: dict[str, Any]) -> None:

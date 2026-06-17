@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from .gateway_hook import (
 from .identity import identity_aliases_json, resolve_identity_from_store, set_identity_alias
 from .record import parse_fact, record_event
 from .smoke import run_smoke_check
+from .state_db_sync import sync_state_db
 from .synthesize import atomic_write_json, load_jsonl, load_state, synthesize_digest
 
 
@@ -95,6 +97,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="String that must be absent from the serialized smoke report; repeatable.",
     )
     smoke.set_defaults(func=run_smoke)
+
+    sync_state = subcommands.add_parser(
+        "sync-state-db",
+        help="Sync compact user/assistant summaries from Hermes state.db into a v1 OAC store.",
+    )
+    sync_state.add_argument("--store", required=True, type=Path, help="Directory containing events.jsonl and state.json")
+    sync_state.add_argument(
+        "--state-db",
+        required=True,
+        type=Path,
+        help="Hermes SQLite state.db to read in read-only mode.",
+    )
+    sync_state.add_argument("--limit", type=int, default=500, help="Maximum messages to scan per run")
+    sync_state.add_argument("--full", action="store_true", help="Scan from message id 0 but do not duplicate existing event ids")
+    sync_state.add_argument("--quiet", action="store_true", help="Suppress report output when no events are synced")
+    sync_state.set_defaults(func=run_sync_state_db)
 
     gateway_hook = subcommands.add_parser(
         "gateway-hook",
@@ -306,6 +324,18 @@ def run_smoke(args: argparse.Namespace) -> int:
         print(f"Smoke checks failed: {args.out}", file=sys.stderr)
         return 1
     return 0
+
+
+def run_sync_state_db(args: argparse.Namespace) -> int:
+    report = sync_state_db(
+        store=args.store,
+        state_db=args.state_db,
+        limit=args.limit,
+        full=args.full,
+    )
+    if not args.quiet or report.get("synced", 0) > 0:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["status"] == "ok" else 1
 
 
 def run_gateway_hook_context_command(args: argparse.Namespace) -> int:
